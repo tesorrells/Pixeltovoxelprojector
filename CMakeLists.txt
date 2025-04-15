@@ -24,10 +24,10 @@ FetchContent_Declare(json
 FetchContent_MakeAvailable(json)
 
 # Include directories
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+include_directories(src)
 
 # Executable for RTSP processor
-add_executable(rtsp_processor rtsp_processor.cpp)
+add_executable(rtsp_processor src/processing/rtsp_processor.cpp)
 target_link_libraries(rtsp_processor ${OpenCV_LIBS} nlohmann_json::nlohmann_json)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(rtsp_processor OpenMP::OpenMP_CXX)
@@ -35,6 +35,24 @@ endif()
 
 # Install targets
 install(TARGETS rtsp_processor DESTINATION bin)
+
+# Executable for Drone Detector
+add_executable(drone_detector
+    src/main.cpp
+    src/cot/cot_message.cpp
+    src/cot/cot_message_generator.cpp
+    src/cot/cot_network_handler.cpp
+    src/processing/voxel_drone_detector.cpp
+)
+target_link_libraries(drone_detector 
+    ${OpenCV_LIBS} 
+    nlohmann_json::nlohmann_json
+)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(drone_detector OpenMP::OpenMP_CXX)
+endif()
+
+install(TARGETS drone_detector DESTINATION bin)
 
 # Add a README with building instructions
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/README.md.in ${CMAKE_CURRENT_BINARY_DIR}/README.md @ONLY) 

@@ -16,9 +16,10 @@
 #include <fstream>
 #include <sstream>
 
-// Include our components
-#include "voxel_drone_detector.cpp"
-#include "cot_message.cpp"
+// Include our components (Headers)
+#include "processing/voxel_drone_detector.h"
+#include "cot/cot_message_generator.h"
+#include "cot/cot_network_handler.h" // Needed for sending CoT
 
 // Flag for controlling program execution
 volatile sig_atomic_t running = 1;
@@ -198,18 +199,25 @@ int main(int argc, char** argv) {
     detector.setClusterParameters(config.min_cluster_size, config.max_cluster_size, config.cluster_tolerance);
     
     // Create the CoT message generator
-    CoTMessageGenerator cot_generator(detector, config.atak_server_ip, config.atak_server_port, config.update_interval);
+    CoTMessageGenerator cot_generator("drone-detector-01");
+    cot_generator.setSensorLocation(config.origin_lat, config.origin_lon, 0.0);
     
-    // Start the CoT message generator
-    if (!cot_generator.start()) {
-        std::cerr << "Failed to start CoT message generator. Check connection to ATAK server." << std::endl;
-        // Continue anyway, as the CoT generator will try to reconnect
+    // Create the CoT Network Handler
+    CoTNetworkHandler cot_sender(config.atak_server_ip, config.atak_server_port);
+    
+    // Start the CoT sender thread
+    if (!cot_sender.start()) {
+        std::cerr << "Failed to start CoT network handler. Check connection to ATAK server: "
+                  << config.atak_server_ip << ":" << config.atak_server_port << std::endl;
+        // Decide if we should exit or continue without sending
+        // return 1; // Example: Exit if sender fails to start
     }
     
     std::cout << "Drone detection system started." << std::endl;
     std::cout << "Press Ctrl+C to exit." << std::endl;
     
     // Main processing loop
+    auto last_cot_send_time = std::chrono::steady_clock::now();
     while (running) {
         if (config.test_mode) {
             // In test mode, simulate a moving drone
@@ -225,6 +233,33 @@ int main(int argc, char** argv) {
         auto drones = detector.getDetectedDrones();
         std::cout << "\rDetected drones: " << drones.size() << "   " << std::flush;
         
+        // Generate and send CoT messages periodically
+        auto current_time = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_cot_send_time).count();
+        
+        if (elapsed_ms >= config.update_interval * 1000 && !drones.empty()) {
+            std::vector<Detection> detections_for_cot; // Convert VoxelDroneDetector::DroneDetection to CoTMessageGenerator::Detection
+            detections_for_cot.reserve(drones.size());
+            for(const auto& drone : drones) {
+                Detection det;
+                det.x = drone.x; // Assuming drone.x/y/z are world coordinates
+                det.y = drone.y;
+                det.z = drone.z;
+                det.confidence = drone.confidence;
+                det.classification = 1; // Assuming classification 1 = drone
+                det.uid = drone.uuid; // Pass the UUID
+                det.timestamp = drone.detection_time;
+                detections_for_cot.push_back(det);
+            }
+
+            if (!detections_for_cot.empty()) {
+                std::vector<std::string> cot_messages = cot_generator.generateCoTMessages(detections_for_cot);
+                cot_sender.queueMessages(cot_messages);
+                std::cout << " [Sent " << cot_messages.size() << " CoT]" << std::flush;
+            }
+            last_cot_send_time = current_time;
+        }
+        
         // Short sleep to prevent CPU overuse
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -232,7 +267,7 @@ int main(int argc, char** argv) {
     std::cout << std::endl << "Shutting down..." << std::endl;
     
     // Stop the CoT message generator
-    cot_generator.stop();
+    cot_sender.stop();
     
     std::cout << "Drone detection system stopped." << std::endl;
     
