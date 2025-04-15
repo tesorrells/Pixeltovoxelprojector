@@ -1,0 +1,97 @@
+# Real-time RTSP Stream Processor for 3D Voxel Reconstruction
+
+This project processes multiple RTSP camera streams in real-time to detect motion and reconstruct the moving objects in a 3D voxel grid.
+
+## Requirements
+
+- C++17 compatible compiler
+- CMake (version 3.10 or later)
+- OpenCV (with videoio support for RTSP streams)
+- nlohmann_json (automatically fetched by CMake if not found)
+- OpenMP (optional, for parallel processing)
+
+## Building
+
+```bash
+# Create a build directory
+mkdir build
+cd build
+
+# Configure and build
+cmake ..
+make
+
+# Optionally install
+make install
+```
+
+## Usage
+
+```bash
+./rtsp_processor <camera_config.json> [output_dir] [save_interval_seconds]
+```
+
+Parameters:
+- `camera_config.json`: JSON file with camera parameters and RTSP URLs
+- `output_dir`: (Optional) Directory to save voxel grids (default: current directory)
+- `save_interval_seconds`: (Optional) How often to save voxel grid (default: 30 seconds)
+
+## Camera Configuration
+
+Create a JSON file with camera information:
+
+```json
+[
+  {
+    "camera_index": 0,
+    "rtsp_url": "rtsp://admin:password@192.168.1.100:554/live",
+    "camera_position": [0.0, 0.0, 0.0],
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "fov_degrees": 60.0
+  },
+  {
+    "camera_index": 1,
+    "rtsp_url": "rtsp://admin:password@192.168.1.101:554/live",
+    "camera_position": [100.0, 0.0, 0.0],
+    "yaw": 270.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "fov_degrees": 60.0
+  }
+]
+```
+
+## Controls
+
+While running:
+- Press 's' to save the current voxel grid state manually
+- Press 'q' to quit the application
+
+## Output Format
+
+The output voxel grid is saved as a binary file with the following format:
+1. First 4 bytes: grid size (N) as int32
+2. Next 4 bytes: voxel size as float32
+3. Remaining bytes: N×N×N grid data as float32 array
+
+## Troubleshooting
+
+### RTSP Connection Issues
+
+If cameras fail to connect:
+1. Verify the RTSP URL format is correct (including credentials if needed)
+2. Check network connectivity and firewall settings
+3. Ensure the cameras support the RTSP protocol
+
+### Performance Optimization
+
+For better performance:
+1. Adjust the motion threshold parameter for your environment
+2. Increase voxel size for faster processing (at the cost of resolution)
+3. Run on a machine with more cores to take advantage of parallelization
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details. 

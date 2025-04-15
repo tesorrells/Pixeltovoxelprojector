@@ -1,0 +1,38 @@
+[
+  {
+    "camera_index": 0,
+    "rtsp_url": "rtsp://admin:password@192.168.1.100:554/live",
+    "camera_position": [0.0, 0.0, 0.0],
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "fov_degrees": 60.0
+  },
+  {
+    "camera_index": 1,
+    "rtsp_url": "rtsp://admin:password@192.168.1.101:554/live",
+    "camera_position": [100.0, 0.0, 0.0],
+    "yaw": 270.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "fov_degrees": 60.0
+  },
+  {
+    "camera_index": 2,
+    "rtsp_url": "rtsp://admin:password@192.168.1.102:554/live",
+    "camera_position": [0.0, 100.0, 0.0],
+    "yaw": 180.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "fov_degrees": 60.0
+  },
+  {
+    "camera_index": 3,
+    "rtsp_url": "rtsp://admin:password@192.168.1.103:554/live",
+    "camera_position": [-100.0, 0.0, 0.0],
+    "yaw": 90.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "fov_degrees": 60.0
+  }
+]
