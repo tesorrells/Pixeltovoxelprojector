@@ -1,0 +1,56 @@
+# ---- General ----
+# macOS / Windows / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.code-workspace
+
+# ---- Build artifacts ----
+# Out-of-source build directory (created by our docs)
+/build/
+# In-tree CMake outputs (in case someone builds in-source)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Object / binary files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+
+# ---- Dependencies fetched by CMake ----
+/deps/
+*_deps/
+
+# ---- Python artefacts ----
+__pycache__/
+*.py[cod]
+*.pyd
+# Virtual-envs
+.env
+.venv/
+venv/
+
+# ---- Logs & misc ----
+*.log
+*.tmp
+
+# ---- Packaging / distribution ----
+*.tar.gz
+*.zip
+*.whl
+build/*/CPack*/
+
+# ---- Generated documentation ----
+/docs/_build/
+
+# End of .gitignore 

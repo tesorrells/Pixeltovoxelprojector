@@ -265,6 +265,12 @@ void VoxelDroneDetector::processVoxelGrid(const std::vector<float>& voxel_grid) 
     updateDetections(potential_voxels);
 }
 
+// Overload that processes the internally maintained voxel grid (populated via setVoxelValue)
+void VoxelDroneDetector::processVoxelGrid() {
+    // Reuse existing processing function using the internally accumulated grid.
+    processVoxelGrid(current_voxel_grid_);
+}
+
 // Simulate setting a single voxel value
 void VoxelDroneDetector::setVoxelValue(int vx, int vy, int vz, float value) {
     std::lock_guard<std::mutex> lock(detector_mutex_);

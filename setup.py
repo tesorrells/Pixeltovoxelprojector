@@ -1,6 +1,7 @@
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 import pybind11
+import numpy
 import sys
 import os
 
@@ -27,9 +28,10 @@ class BuildExt(build_ext):
 ext_modules = [
     Extension(
         'process_image_cpp',
-        ['process_image.cpp'],
+        ['src/processing/process_image.cpp'],
         include_dirs=[
             pybind11.get_include(),  # Use pybind11's function to get the include path
+            numpy.get_include(),
         ],
         language='c++'
     ),

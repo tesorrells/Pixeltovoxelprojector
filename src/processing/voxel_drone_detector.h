@@ -126,6 +126,8 @@ public:
     // Process a new voxel grid - This is the main entry point for detection
     // Assumes voxel_grid is a flat array of size grid_size[0]*grid_size[1]*grid_size[2]
     void processVoxelGrid(const std::vector<float>& voxel_grid);
+    // Overload that uses internally maintained grid (set via setVoxelValue etc.)
+    void processVoxelGrid();
 
     // Simulate setting a voxel value (useful for testing)
     void setVoxelValue(int vx, int vy, int vz, float value);
