@@ -22,6 +22,10 @@
 #include <memory>
 #include <queue>
 #include <condition_variable>
+#ifdef HAVE_ZMQ
+#include <zmq.hpp>
+#include <zlib.h>
+#endif
 
 // External libraries for JSON, OpenCV for stream handling
 #include "nlohmann/json.hpp"
@@ -55,7 +59,7 @@ struct CameraInfo {
 struct FrameData {
     int camera_index;
     cv::Mat frame;  // The actual frame from the camera
-    std::chrono::system_clock::time_point timestamp;
+    std::chrono::steady_clock::time_point timestamp; // monotonic, immune to clock jumps
 };
 
 // Thread-safe frame queue
@@ -64,10 +68,15 @@ private:
     std::queue<FrameData> queue;
     std::mutex mutex;
     std::condition_variable cond;
+    static constexpr std::size_t MAX_Q = 30; // total frames kept in queue
 
 public:
     void push(const FrameData& frame) {
         std::unique_lock<std::mutex> lock(mutex);
+        // Drop oldest frames when queue is full to keep latency bounded
+        while (queue.size() >= MAX_Q) {
+            queue.pop();
+        }
         queue.push(frame);
         cond.notify_one();
     }
@@ -84,8 +93,7 @@ public:
 
     bool waitAndPop(FrameData& frame, int timeout_ms) {
         std::unique_lock<std::mutex> lock(mutex);
-        if (cond.wait_for(lock, std::chrono::milliseconds(timeout_ms), 
-                         [this] { return !queue.empty(); })) {
+        if (cond.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return !queue.empty(); })) {
             frame = queue.front();
             queue.pop();
             return true;
@@ -127,34 +135,21 @@ static inline Vec3 mat3_mul_vec3(const Mat3 &M, const Vec3 &v) {
 // 3) Euler -> Rotation Matrix
 //----------------------------------------------
 Mat3 rotation_matrix_yaw_pitch_roll(float yaw_deg, float pitch_deg, float roll_deg) {
-    float y = deg2rad(yaw_deg);
-    float p = deg2rad(pitch_deg);
-    float r = deg2rad(roll_deg);
-
-    // Build each sub-rotation
+    float y = deg2rad(yaw_deg);   // yaw (Z)
+    float p = deg2rad(pitch_deg); // pitch (Y)
+    float r = deg2rad(roll_deg);  // roll (X)
+    
     // Rz(yaw)
     float cy = std::cos(y), sy = std::sin(y);
-    float Rz[9] = {
-        cy, -sy, 0.f,
-        sy,  cy, 0.f,
-        0.f, 0.f, 1.f
-    };
-
-    // Ry(roll)
-    float cr = std::cos(r), sr = std::sin(r);
-    float Ry[9] = {
-        cr,  0.f, sr,
-        0.f, 1.f, 0.f,
-        -sr, 0.f, cr
-    };
-
-    // Rx(pitch)
+    float Rz[9] = { cy,-sy,0,  sy,cy,0,  0,0,1 };
+    
+    // Ry(pitch)
     float cp = std::cos(p), sp = std::sin(p);
-    float Rx[9] = {
-        1.f,  0.f,  0.f,
-        0.f,  cp,  -sp,
-        0.f,  sp,   cp
-    };
+    float Ry[9] = {  cp,0,sp,  0,1,0,  -sp,0,cp };
+    
+    // Rx(roll)
+    float cr = std::cos(r), sr = std::sin(r);
+    float Rx[9] = { 1,0,0,  0,cr,-sr,  0,sr,cr };
 
     // Helper to multiply 3x3
     auto matmul3x3 = [&](const float A[9], const float B[9], float C[9]){
@@ -255,27 +250,23 @@ struct ImageGray {
 // Convert OpenCV Mat to our ImageGray structure
 ImageGray convert_mat_to_gray(const cv::Mat &frame) {
     ImageGray img;
-    
-    // Convert to grayscale if needed
-    cv::Mat gray;
+
+    // Fast path: convert in OpenCV vectorised code
+    cv::Mat gray8;
     if (frame.channels() == 1) {
-        gray = frame.clone();
+        gray8 = frame; // no copy
     } else {
-        cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+        cv::cvtColor(frame, gray8, cv::COLOR_BGR2GRAY);
     }
-    
-    img.width = gray.cols;
-    img.height = gray.rows;
-    img.pixels.resize(img.width * img.height);
-    
-    // Copy pixels
-    for (int y = 0; y < img.height; y++) {
-        for (int x = 0; x < img.width; x++) {
-            float val = static_cast<float>(gray.at<uchar>(y, x));
-            img.pixels[y * img.width + x] = val;
-        }
-    }
-    
+
+    cv::Mat gray32f;
+    gray8.convertTo(gray32f, CV_32F); // 0..255 floats
+
+    img.width  = gray32f.cols;
+    img.height = gray32f.rows;
+    const float* startPtr = gray32f.ptr<float>();
+    const float* endPtr   = startPtr + gray32f.total();
+    img.pixels.assign(startPtr, endPtr);
     return img;
 }
 
@@ -457,11 +448,17 @@ void camera_stream_thread(
     std::shared_ptr<FrameQueue> frame_queue,
     std::atomic<bool>& running
 ) {
-    cv::VideoCapture cap(camera_info.rtsp_url);
+    // Force OpenCV to use the FFmpeg backend instead of GStreamer for RTSP.
+    cv::VideoCapture cap(camera_info.rtsp_url, cv::CAP_FFMPEG);
     if (!cap.isOpened()) {
         std::cerr << "ERROR: Failed to open RTSP stream: " << camera_info.rtsp_url << std::endl;
         return;
     }
+
+    // Keep latency down (supported on recent OpenCV/FFmpeg builds)
+    cap.set(cv::CAP_PROP_BUFFERSIZE, 1);
+    cap.set(cv::CAP_PROP_OPEN_TIMEOUT_MSEC, 5000);
+    cap.set(cv::CAP_PROP_READ_TIMEOUT_MSEC, 5000);
 
     // Set capture properties if needed
     // cap.set(cv::CAP_PROP_BUFFERSIZE, 1);  // Reduce buffer size for lower latency
@@ -481,7 +478,7 @@ void camera_stream_thread(
             FrameData frameData;
             frameData.camera_index = camera_info.camera_index;
             frameData.frame = frame.clone();
-            frameData.timestamp = std::chrono::system_clock::now();
+            frameData.timestamp = std::chrono::steady_clock::now();
             
             frame_queue->push(frameData);
         } else {
@@ -518,11 +515,16 @@ void processing_thread(
     float motion_threshold,
     float alpha,  // distance-based attenuation
     std::atomic<bool>& running,
+#ifdef HAVE_ZMQ
+    zmq::socket_t* pub_socket,
+#else
+    void* /*unused*/,
+#endif
     int save_interval_seconds = 30
 ) {
     // Map to store the previous frame for each camera
     std::map<int, ImageGray> prev_frames;
-    std::map<int, std::chrono::system_clock::time_point> last_frame_times;
+    std::map<int, std::chrono::steady_clock::time_point> last_frame_times;
     
     auto last_save_time = std::chrono::system_clock::now();
     
@@ -562,31 +564,31 @@ void processing_thread(
                 // Use the current frame's camera info for ray-casting
                 Vec3 cam_pos = cam_info.camera_position;
                 Mat3 cam_rot = rotation_matrix_yaw_pitch_roll(cam_info.yaw, cam_info.pitch, cam_info.roll);
-                float fov_rad = deg2rad(cam_info.fov_degrees);
-                float focal_len = (mm.width*0.5f) / std::tan(fov_rad*0.5f);
+                // --- camera intrinsics ---
+                float fov_h_rad = deg2rad(cam_info.fov_degrees);
+                float fx = (mm.width * 0.5f) / std::tan(fov_h_rad * 0.5f);
+                float aspect = float(mm.width) / float(mm.height);
+                float fov_v_rad = 2.f * std::atan((1.f / aspect) * std::tan(fov_h_rad * 0.5f));
+                float fy = (mm.height * 0.5f) / std::tan(fov_v_rad * 0.5f);
 
                 // For each changed pixel, accumulate into the voxel grid
+                bool any_voxel_written = false;
                 {
                     std::lock_guard<std::mutex> lock(voxel_grid_mutex);
                     
                     for (int v = 0; v < mm.height; v++) {
                         for (int u = 0; u < mm.width; u++) {
-                            if (!mm.changed[v * mm.width + u]) {
+                            if (!mm.changed[v * mm.width + u])
                                 continue; // skip if no motion
-                            }
-                            
-                            // Pixel brightness from current or use mm.diff
+
                             float pix_val = mm.diff[v * mm.width + u];
-                            if (pix_val < 1e-3f) {
+                            if (pix_val < 1e-3f)
                                 continue;
-                            }
 
                             // Build local camera direction
-                            float x = (float(u) - 0.5f * mm.width);
-                            float y = -(float(v) - 0.5f * mm.height);
-                            float z = -focal_len;
-
-                            Vec3 ray_cam = {x, y, z};
+                            float x = (float(u) - 0.5f * mm.width)  / fx;
+                            float y = -(float(v) - 0.5f * mm.height) / fy;
+                            Vec3 ray_cam = { x, y, -1.f };
                             ray_cam = normalize(ray_cam);
 
                             // Transform to world
@@ -595,8 +597,7 @@ void processing_thread(
 
                             // DDA
                             std::vector<RayStep> steps = cast_ray_into_grid(
-                                cam_pos, ray_world, N, voxel_size, grid_center
-                            );
+                                cam_pos, ray_world, N, voxel_size, grid_center);
 
                             // Accumulate
                             for (const auto& rs : steps) {
@@ -605,10 +606,44 @@ void processing_thread(
                                 float val = pix_val * attenuation;
                                 int idx = rs.ix * N * N + rs.iy * N + rs.iz;
                                 voxel_grid[idx] += val;
+                                any_voxel_written = true;
                             }
                         }
                     }
                 }
+
+                if (any_voxel_written) {
+                    auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                    std::cout << "[" << std::put_time(std::localtime(&t), "%H:%M:%S")
+                              << "] Camera " << camera_index << " added voxels." << std::endl;
+                }
+#ifdef HAVE_ZMQ
+                // Publish compressed voxel grid every frame for live viewer
+                if (pub_socket && pub_socket->handle() != nullptr) {
+                    std::lock_guard<std::mutex> grid_lock(voxel_grid_mutex);
+
+                    struct Meta { int N; float voxel_size; } meta{N, voxel_size};
+
+                    // Compress voxel vector (fast)
+                    uLong src_len = voxel_grid.size() * sizeof(float);
+                    uLong dst_len = compressBound(src_len);
+                    std::vector<uint8_t> compressed(dst_len);
+                    if (compress2(compressed.data(), &dst_len,
+                                  reinterpret_cast<const Bytef*>(voxel_grid.data()),
+                                  src_len, Z_BEST_SPEED) == Z_OK) {
+                        compressed.resize(dst_len);
+
+                        zmq::message_t m_meta(sizeof(meta));
+                        memcpy(m_meta.data(), &meta, sizeof(meta));
+
+                        zmq::message_t m_data(compressed.size());
+                        memcpy(m_data.data(), compressed.data(), compressed.size());
+
+                        pub_socket->send(m_meta, zmq::send_flags::sndmore);
+                        pub_socket->send(m_data, zmq::send_flags::dontwait);
+                    }
+                }
+#endif
             }
             
             // Update previous frame and timestamp
@@ -651,6 +686,8 @@ void processing_thread(
 // 9) Main Function
 //----------------------------------------------
 int main(int argc, char** argv) {
+    setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|stimeout;5000000|max_delay;0", 1);
+
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <camera_config.json> [output_dir] [save_interval_seconds]\n";
         std::cerr << "camera_config.json: JSON file with camera parameters and RTSP URLs\n";
@@ -712,6 +749,24 @@ int main(int argc, char** argv) {
     float motion_threshold = 5.0f;  // higher threshold for real-time processing
     float alpha = 0.1f;            // distance-based attenuation
     
+#ifdef HAVE_ZMQ
+    zmq::context_t zmq_ctx(1);
+    zmq::socket_t  zmq_pub(zmq_ctx, zmq::socket_type::pub);
+
+    const char* portEnv = std::getenv("ZMQ_PORT");
+    std::string port    = portEnv ? portEnv : "5556";
+    std::string address = "tcp://127.0.0.1:" + port;
+
+    try {
+        zmq_pub.bind(address);
+        std::cout << "ZeroMQ publisher bound to " << address << '\n';
+    } catch(const zmq::error_t& e) {
+        std::cerr << "ERROR: cannot bind ZeroMQ socket: " << e.what()
+                  << "  (" << address << ")\n";
+        return 2;
+    }
+#endif
+
     std::thread processor(processing_thread,
                          camera_info_map,
                          frame_queue,
@@ -723,6 +778,11 @@ int main(int argc, char** argv) {
                          motion_threshold,
                          alpha,
                          std::ref(running),
+#ifdef HAVE_ZMQ
+                         &zmq_pub,
+#else
+                         nullptr,
+#endif
                          save_interval);
     
     // Basic console interface

@@ -42,8 +42,26 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(rtsp_processor OpenMP::OpenMP_CXX)
 endif()
 
+# zlib needed for voxel compression
+find_package(ZLIB REQUIRED)
+target_include_directories(rtsp_processor PRIVATE ${ZLIB_INCLUDE_DIRS})
+target_link_libraries(rtsp_processor ${ZLIB_LIBRARIES})
+
 # Install targets
 install(TARGETS rtsp_processor DESTINATION bin)
+
+# -------------------------- ZeroMQ (optional live publisher) -------------------------
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(ZeroMQ QUIET libzmq)
+
+if(ZeroMQ_FOUND)
+    message(STATUS "ZeroMQ found – enabling live publisher")
+    target_compile_definitions(rtsp_processor PRIVATE HAVE_ZMQ)
+    target_include_directories(rtsp_processor PRIVATE ${ZeroMQ_INCLUDE_DIRS})
+    target_link_libraries(rtsp_processor ${ZeroMQ_LIBRARIES})
+else()
+    message(STATUS "ZeroMQ not found – live publisher disabled")
+endif()
 
 # Executable for Drone Detector
 add_executable(drone_detector

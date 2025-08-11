@@ -7,7 +7,7 @@ Requirements:
     pip install pyvista numpy
 
 Usage:
-    python pyvista_interactive_view_with_rotation_history.py
+    python pyvista_interactive_view_with_rotation_history.py <voxel_grid.bin>
 
 Description:
     1) Loads voxel_grid.bin (written by your C++ code).
@@ -25,6 +25,7 @@ import re
 import math
 import numpy as np
 import pyvista as pv
+import sys
 
 
 def load_voxel_grid(filename):
@@ -161,9 +162,20 @@ def get_next_image_index(folder, prefix="voxel_", suffix=".png"):
 
 
 def main():
-    # 1) Load the voxel grid
-    voxel_grid, vox_size = load_voxel_grid("voxel_grid.bin")
-    print("Loaded voxel grid:", voxel_grid.shape, "voxel_size=", vox_size)
+    # 1) Decide which file to open
+    if len(sys.argv) >= 2:
+        in_path = sys.argv[1]
+    else:
+        in_path = "voxel_grid.bin"
+
+    if not os.path.isfile(in_path):
+        print("Usage: python", sys.argv[0], "<voxel_grid.bin>")
+        print("\nDefault attempts to open ./voxel_grid.bin but the file was not found.")
+        return
+
+    # 2) Load the voxel grid
+    voxel_grid, vox_size = load_voxel_grid(in_path)
+    print("Loaded", in_path, "shape", voxel_grid.shape, "voxel_size=", vox_size)
     print("Max voxel value:", voxel_grid.max())
 
     # 2) Define the grid center (x,y,z)

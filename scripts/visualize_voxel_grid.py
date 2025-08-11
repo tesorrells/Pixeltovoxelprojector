@@ -10,6 +10,11 @@ Usage:
     
     - voxel_grid_directory: Directory where voxel grid files are saved
     - threshold: Optional brightness threshold for visualization (default: 0.5)
+
+    TO RUN:
+    export PYOPENGL_PLATFORM=glx
+    export DISPLAY=${DISPLAY:-:0}
+    python scripts/visualize_voxel_grid.py voxels
 """
 
 import sys
@@ -17,8 +22,8 @@ import os
 import time
 import numpy as np
 import struct
-import glob
-from datetime import datetime
+import zlib
+import zmq
 from threading import Thread, Lock
 
 # OpenGL visualization
@@ -173,20 +178,17 @@ class VoxelGrid:
 # Global variables
 voxel_grid = VoxelGrid()
 camera = Camera()
-monitor_dir = "."
-last_file_check = 0
-file_check_interval = 1.0  # seconds
+runnning = True
 width, height = 1200, 800
 keys_pressed = set()
-running = True
 
 # Keyboard and mouse handlers
 def keyboard(key, x, y):
     global keys_pressed
-    global running
+    global runnning
     
     if key == b'q' or key == b'Q':
-        running = False
+        runnning = False
         glutLeaveMainLoop()
     elif key == b'+' or key == b'=':
         with voxel_grid.mutex:
@@ -246,22 +248,33 @@ def reshape(w, h):
     gluPerspective(45.0, width / height, 1.0, 5000.0)
     glMatrixMode(GL_MODELVIEW)
 
-# File monitoring thread
-def monitor_files():
-    global running
-    
-    while running:
+# ---------------- ZeroMQ live listener -----------------
+def zmq_listener():
+    ctx = zmq.Context.instance()
+    sub = ctx.socket(zmq.SUB)
+    sub.connect("tcp://127.0.0.1:5556")
+    sub.setsockopt_string(zmq.SUBSCRIBE, "")
+
+    global runnning
+    while runnning:
         try:
-            # Find latest voxel grid file
-            voxel_files = glob.glob(os.path.join(monitor_dir, "voxel_grid_*.bin"))
-            if voxel_files:
-                latest_file = max(voxel_files, key=os.path.getmtime)
-                voxel_grid.load_file(latest_file)
-                
-            time.sleep(0.5)
+            meta = sub.recv(flags=zmq.NOBLOCK)
+            data = sub.recv()
+        except zmq.Again:
+            time.sleep(0.01)
+            continue
+
+        try:
+            N, voxel_size = struct.unpack("if", meta)
+            decompressed = zlib.decompress(data)
+            grid = np.frombuffer(decompressed, dtype=np.float32)
+            with voxel_grid.mutex:
+                voxel_grid.N = N
+                voxel_grid.voxel_size = voxel_size
+                voxel_grid.grid = grid.reshape((N, N, N))
+                voxel_grid.display_list_valid = False
         except Exception as e:
-            print(f"Error in monitor thread: {e}")
-            time.sleep(1)
+            print("ZMQ listener error", e)
 
 # Process keyboard input and move camera
 def process_input():
@@ -379,20 +392,14 @@ def idle():
 
 # Main function
 def main():
-    global monitor_dir
+    global runnning
     
-    # Parse command line arguments
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <voxel_grid_directory> [threshold]")
-        return 1
-    
-    monitor_dir = sys.argv[1]
-    if not os.path.isdir(monitor_dir):
-        print(f"Error: {monitor_dir} is not a valid directory")
-        return 1
-    
-    if len(sys.argv) >= 3:
-        voxel_grid.threshold = float(sys.argv[2])
+    # Parse optional threshold
+    if len(sys.argv) >= 2:
+        try:
+            voxel_grid.threshold = float(sys.argv[1])
+        except ValueError:
+            pass  # ignore if not a float
     
     # Initialize GLUT
     glutInit(sys.argv)
@@ -413,10 +420,9 @@ def main():
     glEnable(GL_DEPTH_TEST)
     glEnable(GL_POINT_SMOOTH)
     
-    # Start file monitoring thread
-    monitor_thread = Thread(target=monitor_files)
-    monitor_thread.daemon = True
-    monitor_thread.start()
+    # Start ZeroMQ listener thread
+    listener = Thread(target=zmq_listener, daemon=True)
+    listener.start()
     
     print("3D Voxel Grid Visualizer")
     print("------------------------")
