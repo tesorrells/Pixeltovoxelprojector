@@ -1,48 +1,51 @@
 #!/usr/bin/env python3
-"""Create metadata.json for captured OAK-D Pro frames"""
+"""
+Create Metadata JSON for Offline Ray Voxel Processing
+
+Converts captured OAK-D Pro frame data into the metadata format
+expected by ray_voxel.cpp for offline stereo reconstruction testing.
+"""
 
 import json
 import os
-import glob
+import sys
+from datetime import datetime
 
-def create_metadata_json(frames_dir="simple_captures", output_file="metadata.json"):
-    """Create metadata.json for the original ray_voxel.cpp implementation"""
+def create_metadata_json(images_folder, output_json="metadata.json", fov_degrees=85.0, baseline_mm=75.0):
+    """
+    Create metadata JSON for ray_voxel.cpp from captured OAK-D frames
     
-    # Get list of left and right frames
-    left_frames = sorted(glob.glob(os.path.join(frames_dir, "left", "frame_*.png")))
-    right_frames = sorted(glob.glob(os.path.join(frames_dir, "right", "frame_*.png")))
+    Args:
+        images_folder: Base folder containing left/ and right/ subdirectories
+        output_json: Output JSON file path
+        fov_degrees: Camera field of view in degrees
+        baseline_mm: Distance between cameras in millimeters
+    """
     
-    print(f"Found {len(left_frames)} left frames and {len(right_frames)} right frames")
+    left_folder = os.path.join(images_folder, "left")
+    right_folder = os.path.join(images_folder, "right")
     
-    if len(left_frames) != len(right_frames):
-        print("Warning: Unequal number of left and right frames")
+    if not os.path.exists(left_folder) or not os.path.exists(right_folder):
+        raise ValueError(f"Left or right camera folders not found in {images_folder}")
     
+    # Get list of image files
+    left_files = sorted([f for f in os.listdir(left_folder) if f.endswith('.png')])
+    right_files = sorted([f for f in os.listdir(right_folder) if f.endswith('.png')])
+    
+    if len(left_files) != len(right_files):
+        raise ValueError(f"Mismatch: {len(left_files)} left files vs {len(right_files)} right files")
+    
+    print(f"📁 Processing {len(left_files)} frame pairs from {images_folder}")
+    
+    # Create metadata structure
     frames_metadata = []
     
-    # OAK-D Pro stereo baseline (distance between cameras) in mm
-    # The OAK-D Pro has a baseline of approximately 75mm
-    baseline_mm = 75.0
-    
-    # Camera parameters based on OAK-D Pro specifications
-    # FOV for 720p mono cameras is approximately 73 degrees
-    fov_degrees = 73.0
-    
-    # Process all frames
-    num_frames = min(len(left_frames), len(right_frames))
-    
-    for i in range(num_frames):
-        left_frame = left_frames[i]
-        right_frame = right_frames[i]
+    for frame_idx, (left_file, right_file) in enumerate(zip(left_files, right_files)):
+        # Use relative paths from the images_folder base
+        left_rel_path = os.path.relpath(os.path.join(left_folder, left_file), images_folder)
+        right_rel_path = os.path.relpath(os.path.join(right_folder, right_file), images_folder)
         
-        # Extract frame index from filename
-        left_basename = os.path.basename(left_frame)
-        frame_idx = int(left_basename.split('_')[1].split('.')[0])
-        
-        # Convert to relative paths (ray_voxel.cpp will prefix with images_folder)
-        left_rel_path = os.path.relpath(left_frame, frames_dir)
-        right_rel_path = os.path.relpath(right_frame, frames_dir)
-        
-        # Left camera (camera_index = 0) - positioned to match expected coordinate system
+        # Left camera entry (camera_index = 0) - positioned to match corrected coordinate system
         left_entry = {
             "camera_index": 0,
             "frame_index": frame_idx,
@@ -55,7 +58,7 @@ def create_metadata_json(frames_dir="simple_captures", output_file="metadata.jso
         }
         frames_metadata.append(left_entry)
         
-        # Right camera (camera_index = 1)
+        # Right camera entry (camera_index = 1)
         right_entry = {
             "camera_index": 1,
             "frame_index": frame_idx,
@@ -68,15 +71,57 @@ def create_metadata_json(frames_dir="simple_captures", output_file="metadata.jso
         }
         frames_metadata.append(right_entry)
     
-    # Save metadata
-    with open(output_file, 'w') as f:
-        json.dump(frames_metadata, f, indent=2)
+    # Create full metadata structure
+    metadata = {
+        "generation_info": {
+            "created_by": "create_metadata_json.py",
+            "timestamp": datetime.now().isoformat(),
+            "source_folder": images_folder,
+            "frame_count": len(left_files),
+            "camera_count": 2
+        },
+        "camera_setup": {
+            "baseline_mm": baseline_mm,
+            "fov_degrees": fov_degrees,
+            "coordinate_system": "right_handed",
+            "left_camera_position": [-baseline_mm, 0.0, 0.0],
+            "right_camera_position": [0.0, 0.0, 0.0]
+        },
+        "frames": frames_metadata
+    }
     
-    print(f"Created metadata.json with {len(frames_metadata)} entries")
-    print(f"Covers {num_frames} frame pairs from both cameras")
-    print(f"Saved to: {output_file}")
+    # Write metadata JSON
+    output_path = os.path.join(images_folder, output_json)
+    with open(output_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
     
-    return output_file
+    print(f"✅ Created metadata JSON: {output_path}")
+    print(f"📊 Total entries: {len(frames_metadata)} ({len(left_files)} frame pairs × 2 cameras)")
+    print(f"🎯 Baseline: {baseline_mm}mm, FOV: {fov_degrees}°")
+    
+    return output_path
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Create metadata JSON for offline ray voxel processing")
+    parser.add_argument("images_folder", help="Folder containing left/ and right/ subdirectories with captured frames")
+    parser.add_argument("--output", "-o", default="metadata.json", help="Output JSON filename (saved in images_folder)")
+    parser.add_argument("--fov", type=float, default=85.0, help="Camera field of view in degrees")
+    parser.add_argument("--baseline", type=float, default=75.0, help="Camera baseline distance in mm")
+    
+    args = parser.parse_args()
+    
+    if not os.path.exists(args.images_folder):
+        print(f"❌ Error: Folder '{args.images_folder}' does not exist")
+        sys.exit(1)
+    
+    try:
+        create_metadata_json(args.images_folder, args.output, args.fov, args.baseline)
+        print(f"\n🎯 Usage: ./build/ray_voxel {args.images_folder} {args.output}")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    create_metadata_json()
+    main()

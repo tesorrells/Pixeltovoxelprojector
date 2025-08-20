@@ -208,8 +208,8 @@ std::vector<CameraInfo> load_camera_config(const std::string &json_path) {
     
     // Helper function to parse a single camera entry
     auto parse_camera_entry = [](const json& entry) -> CameraInfo {
-        CameraInfo ci;
-        ci.camera_index = entry.value("camera_index", 0);
+            CameraInfo ci;
+            ci.camera_index = entry.value("camera_index", 0);
         
         // Determine camera type
         std::string type_str = entry.value("camera_type", "rtsp");
@@ -233,20 +233,20 @@ std::vector<CameraInfo> load_camera_config(const std::string &json_path) {
             ci.fps = 30;
         }
         
-        ci.yaw = entry.value("yaw", 0.f);
-        ci.pitch = entry.value("pitch", 0.f);
-        ci.roll = entry.value("roll", 0.f);
+            ci.yaw = entry.value("yaw", 0.f);
+            ci.pitch = entry.value("pitch", 0.f);
+            ci.roll = entry.value("roll", 0.f);
 
-        // camera_position array
+            // camera_position array
         ci.camera_position = {0.f, 0.f, 0.f}; // default
-        if (entry.contains("camera_position") && entry["camera_position"].is_array()) {
-            auto arr = entry["camera_position"];
-            if (arr.size() >= 3) {
-                ci.camera_position.x = arr[0].get<float>();
-                ci.camera_position.y = arr[1].get<float>();
-                ci.camera_position.z = arr[2].get<float>();
+            if (entry.contains("camera_position") && entry["camera_position"].is_array()) {
+                auto arr = entry["camera_position"];
+                if (arr.size() >= 3) {
+                    ci.camera_position.x = arr[0].get<float>();
+                    ci.camera_position.y = arr[1].get<float>();
+                    ci.camera_position.z = arr[2].get<float>();
+                }
             }
-        }
         return ci;
     };
 
@@ -654,7 +654,7 @@ void processing_thread(
     
     // Buffer for stereo motion data - stores motion rays from each camera
     std::map<int, CameraMotionData> motion_buffer;
-    const int max_time_diff_ms = 500; // Maximum time difference between cameras for stereo matching
+    const int max_time_diff_ms = 1000; // More relaxed time window for real-time processing
     
     auto last_save_time = std::chrono::system_clock::now();
     
@@ -706,25 +706,25 @@ void processing_thread(
                 cmd.camera_index = camera_index;
                 cmd.timestamp = frame_data.timestamp;
                 cmd.motion_rays.clear();
-                
-                for (int v = 0; v < mm.height; v++) {
-                    for (int u = 0; u < mm.width; u++) {
-                        if (!mm.changed[v * mm.width + u])
-                            continue; // skip if no motion
+                    
+                    for (int v = 0; v < mm.height; v++) {
+                        for (int u = 0; u < mm.width; u++) {
+                            if (!mm.changed[v * mm.width + u])
+                                continue; // skip if no motion
 
-                        float pix_val = mm.diff[v * mm.width + u];
-                        if (pix_val < 1e-3f)
-                            continue;
+                            float pix_val = mm.diff[v * mm.width + u];
+                            if (pix_val < 1e-3f)
+                                continue;
 
-                        // Build local camera direction
-                        float x = (float(u) - 0.5f * mm.width)  / fx;
-                        float y = -(float(v) - 0.5f * mm.height) / fy;
-                        Vec3 ray_cam = { x, y, -1.f };
-                        ray_cam = normalize(ray_cam);
+                        // Build local camera direction - CORRECTED coordinate system
+                            float x = (float(u) - 0.5f * mm.width)  / fx;
+                        float y = (float(v) - 0.5f * mm.height) / fy;  // Remove Y flip
+                        Vec3 ray_cam = { x, y, 1.f };  // Positive Z for right-hand system
+                            ray_cam = normalize(ray_cam);
 
-                        // Transform to world
-                        Vec3 ray_world = mat3_mul_vec3(cam_rot, ray_cam);
-                        ray_world = normalize(ray_world);
+                            // Transform to world
+                            Vec3 ray_world = mat3_mul_vec3(cam_rot, ray_cam);
+                            ray_world = normalize(ray_world);
 
                         // Store the motion ray
                         MotionRay ray;
@@ -804,8 +804,8 @@ void processing_thread(
                                     const auto& ray1 = cam1_data.motion_rays[r1];
                                     const auto& ray2 = cam2_data.motion_rays[r2];
                                     
-                                    // Only process strong motion rays
-                                    if (ray1.intensity < 30.0f || ray2.intensity < 30.0f) continue;
+                                    // Only process significant motion rays (relaxed for real-time)
+                                    if (ray1.intensity < 15.0f || ray2.intensity < 15.0f) continue;
                                     
                                     // Find closest approach between two rays
                                     Vec3 w0 = {ray1.origin.x - ray2.origin.x,
@@ -849,8 +849,8 @@ void processing_thread(
                                                           (p1.y - p2.y) * (p1.y - p2.y) +
                                                           (p1.z - p2.z) * (p1.z - p2.z));
                                     
-                                    // If rays intersect closely, add to voxel grid
-                                    if (dist < voxel_size * 1.5f) { // Much stricter intersection threshold
+                                    // If rays intersect closely, add to voxel grid  
+                                    if (dist < voxel_size * 3.0f) { // More relaxed for real-time drone detection
                                         Vec3 intersection = {(p1.x + p2.x) * 0.5f,
                                                            (p1.y + p2.y) * 0.5f,
                                                            (p1.z + p2.z) * 0.5f};
@@ -902,8 +902,8 @@ void processing_thread(
                             }
                         }
                         
-                        auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-                        std::cout << "[" << std::put_time(std::localtime(&t), "%H:%M:%S")
+                    auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                    std::cout << "[" << std::put_time(std::localtime(&t), "%H:%M:%S")
                                   << "] Stereo intersection: " << intersection_count 
                                   << " intersections found, updated voxels." << std::endl;
                     }
@@ -923,32 +923,33 @@ void processing_thread(
             }
             
 #ifdef HAVE_ZMQ
-            // Publish compressed voxel grid occasionally for live viewer
+            // Publish compressed voxel grid frequently for live viewer
             static int frame_count = 0;
-            if (++frame_count % 30 == 0 && pub_socket && pub_socket->handle() != nullptr) {
-                std::lock_guard<std::mutex> grid_lock(voxel_grid_mutex);
+            if (++frame_count % 5 == 0 && pub_socket && pub_socket->handle() != nullptr) {
+                    std::lock_guard<std::mutex> grid_lock(voxel_grid_mutex);
 
-                struct Meta { int N; float voxel_size; } meta{N, voxel_size};
+                    struct Meta { int N; float voxel_size; } meta{N, voxel_size};
 
-                // Compress voxel vector (fast)
-                uLong src_len = voxel_grid.size() * sizeof(float);
-                uLong dst_len = compressBound(src_len);
-                std::vector<uint8_t> compressed(dst_len);
-                if (compress2(compressed.data(), &dst_len,
-                              reinterpret_cast<const Bytef*>(voxel_grid.data()),
-                              src_len, Z_BEST_SPEED) == Z_OK) {
-                    compressed.resize(dst_len);
+                    // Compress voxel vector (fast)
+                    uLong src_len = voxel_grid.size() * sizeof(float);
+                    uLong dst_len = compressBound(src_len);
+                    std::vector<uint8_t> compressed(dst_len);
+                    if (compress2(compressed.data(), &dst_len,
+                                  reinterpret_cast<const Bytef*>(voxel_grid.data()),
+                                  src_len, Z_BEST_SPEED) == Z_OK) {
+                        compressed.resize(dst_len);
 
-                    zmq::message_t m_meta(sizeof(meta));
-                    memcpy(m_meta.data(), &meta, sizeof(meta));
+                        zmq::message_t m_meta(sizeof(meta));
+                        memcpy(m_meta.data(), &meta, sizeof(meta));
 
-                    zmq::message_t m_data(compressed.size());
-                    memcpy(m_data.data(), compressed.data(), compressed.size());
+                        zmq::message_t m_data(compressed.size());
+                        memcpy(m_data.data(), compressed.data(), compressed.size());
 
-                    pub_socket->send(m_meta, zmq::send_flags::sndmore);
-                    pub_socket->send(m_data, zmq::send_flags::dontwait);
+                        pub_socket->send(m_meta, zmq::send_flags::sndmore);
+                        pub_socket->send(m_data, zmq::send_flags::dontwait);
+                        std::cout << "[ZMQ] Published voxel grid (" << compressed.size() << " bytes compressed)\n";
+                    }
                 }
-            }
 #endif
             
             // Update previous frame and timestamp
@@ -1045,10 +1046,10 @@ int main(int argc, char** argv) {
     std::vector<std::thread> camera_threads;
     for (const auto& camera : cameras) {
         if (camera.camera_type == CameraType::RTSP) {
-            camera_threads.emplace_back(camera_stream_thread, 
-                                       camera, 
-                                       frame_queue, 
-                                       std::ref(running));
+        camera_threads.emplace_back(camera_stream_thread, 
+                                   camera, 
+                                   frame_queue, 
+                                   std::ref(running));
         } 
 #ifdef HAVE_DEPTHAI
         else if (camera.camera_type == CameraType::OAK_D_PRO) {
@@ -1063,8 +1064,8 @@ int main(int argc, char** argv) {
         }
     }
     
-    // Processing thread
-    float motion_threshold = 25.0f;  // much higher threshold to reduce noise
+    // Processing thread - optimized for drone detection
+    float motion_threshold = 15.0f;  // Balanced threshold for drone detection
     float alpha = 0.1f;            // distance-based attenuation
     
 #ifdef HAVE_ZMQ
@@ -1077,14 +1078,16 @@ int main(int argc, char** argv) {
 
     try {
         zmq_pub.bind(address);
-        std::cout << "ZeroMQ publisher bound to " << address << '\n';
+        std::cout << "✅ ZeroMQ publisher bound to " << address << '\n';
     } catch(const zmq::error_t& e) {
-        std::cerr << "ERROR: cannot bind ZeroMQ socket: " << e.what()
+        std::cerr << "❌ ERROR: cannot bind ZeroMQ socket: " << e.what()
                   << "  (" << address << ")\n";
         return 2;
     }
 #endif
 
+    std::cout << "🚀 Starting processing thread with ZMQ publishing enabled...\n";
+    
     std::thread processor(processing_thread,
                          camera_info_map,
                          frame_queue,
