@@ -1,0 +1,30 @@
+[
+  {
+    "camera_index": 0,
+    "camera_type": "rtsp",
+    "rtsp_url": "http://localhost:8080/stream",
+    "camera_position": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "fov_degrees": 73.0
+  },
+  {
+    "camera_index": 1,
+    "camera_type": "rtsp",
+    "rtsp_url": "http://localhost:8081/stream",
+    "camera_position": [
+      75,
+      0.0,
+      0.0
+    ],
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "fov_degrees": 73.0
+  }
+]

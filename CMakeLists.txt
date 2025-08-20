@@ -18,6 +18,43 @@ if(OpenMP_CXX_FOUND)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 endif()
 
+# Find DepthAI (optional) for OAK-D Pro camera support
+find_package(depthai QUIET)
+if(depthai_FOUND)
+    message(STATUS "DepthAI found - enabling OAK-D Pro camera support")
+    set(HAVE_DEPTHAI ON)
+else()
+    # Try to find DepthAI in common installation paths
+    find_path(DEPTHAI_INCLUDE_DIR 
+        NAMES depthai/depthai.hpp
+        PATHS 
+            /usr/local/include
+            /usr/include
+            ~/.local/include
+            $ENV{HOME}/.local/include
+    )
+    
+    find_library(DEPTHAI_LIBRARY
+        NAMES depthai-core
+        PATHS
+            /usr/local/lib
+            /usr/lib
+            ~/.local/lib
+            $ENV{HOME}/.local/lib
+    )
+    
+    if(DEPTHAI_INCLUDE_DIR AND DEPTHAI_LIBRARY)
+        message(STATUS "DepthAI found at ${DEPTHAI_INCLUDE_DIR} - enabling OAK-D Pro camera support")
+        set(HAVE_DEPTHAI ON)
+        set(DEPTHAI_LIBRARIES ${DEPTHAI_LIBRARY})
+        set(DEPTHAI_INCLUDE_DIRS ${DEPTHAI_INCLUDE_DIR})
+    else()
+        message(STATUS "DepthAI not found - OAK-D Pro camera support disabled")
+        message(STATUS "To enable OAK-D Pro support, install DepthAI C++ library")
+        message(STATUS "For now, you can build without OAK-D Pro support")
+    endif()
+endif()
+
 # Find nlohmann_json package - prefer system install, fall back to FetchContent
 find_package(nlohmann_json 3.11.2 QUIET)
 
@@ -37,9 +74,20 @@ include_directories(src)
 
 # Executable for RTSP processor
 add_executable(rtsp_processor src/processing/rtsp_processor.cpp)
-target_link_libraries(rtsp_processor ${OpenCV_LIBS} nlohmann_json::nlohmann_json Threads::Threads)
+target_link_libraries(rtsp_processor ${OpenCV_LIBS} nlohmann_json::nlohmann_json Threads::Threads stdc++fs)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(rtsp_processor OpenMP::OpenMP_CXX)
+endif()
+
+# Add DepthAI support if available
+if(HAVE_DEPTHAI)
+    target_compile_definitions(rtsp_processor PRIVATE HAVE_DEPTHAI)
+    if(depthai_FOUND)
+        target_link_libraries(rtsp_processor depthai::core depthai::opencv)
+    else()
+        target_include_directories(rtsp_processor PRIVATE ${DEPTHAI_INCLUDE_DIRS})
+        target_link_libraries(rtsp_processor ${DEPTHAI_LIBRARIES})
+    endif()
 endif()
 
 # zlib needed for voxel compression
@@ -49,6 +97,12 @@ target_link_libraries(rtsp_processor ${ZLIB_LIBRARIES})
 
 # Install targets
 install(TARGETS rtsp_processor DESTINATION bin)
+
+# Original offline ray_voxel implementation
+add_executable(ray_voxel src/processing/ray_voxel.cpp)
+target_include_directories(ray_voxel PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ray_voxel nlohmann_json::nlohmann_json Threads::Threads stdc++fs)
+install(TARGETS ray_voxel DESTINATION bin)
 
 # -------------------------- ZeroMQ (optional live publisher) -------------------------
 find_package(PkgConfig REQUIRED)

@@ -433,8 +433,8 @@ int main(int argc, char** argv) {
     //------------------------------------------
     const int N = 500;
     const float voxel_size = 6.f;
-    // Hard-coded center (like your Python example):
-    Vec3 grid_center = {-0.f, 0.f, 500.f};
+    // Grid center positioned in front of cameras
+    Vec3 grid_center = {0.f, 0.f, 500.f};
     //    Vec3 grid_center = {-0.f, 0.f, 200.f}; // For birds
 
     std::vector<float> voxel_grid(N*N*N, 0.f);
@@ -502,10 +502,10 @@ int main(int argc, char** argv) {
                         continue;
                     }
 
-                    // Build local camera direction
+                    // Build local camera direction - CORRECTED for right-hand coordinate system
                     float x = (float(u) - 0.5f*mm.width);
-                    float y = - (float(v) - 0.5f*mm.height);
-                    float z = -focal_len;
+                    float y = (float(v) - 0.5f*mm.height);  // Remove Y flip too
+                    float z = focal_len;  // Remove Z flip for right-hand system
 
                     Vec3 ray_cam = {x,y,z};
                     ray_cam = normalize(ray_cam);

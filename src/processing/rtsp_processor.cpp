@@ -27,6 +27,10 @@
 #include <zlib.h>
 #endif
 
+#ifdef HAVE_DEPTHAI
+#include "depthai/depthai.hpp"
+#endif
+
 // External libraries for JSON, OpenCV for stream handling
 #include "nlohmann/json.hpp"
 #include <opencv2/opencv.hpp>
@@ -47,13 +51,26 @@ struct Mat3 {
     float m[9];
 };
 
+enum class CameraType {
+    RTSP,
+    OAK_D_PRO,
+    IMAGE_SEQUENCE
+};
+
 struct CameraInfo {
     int camera_index;
-    std::string rtsp_url;
+    CameraType camera_type;
+    std::string rtsp_url;  // For RTSP cameras
+    std::string device_id; // For OAK-D Pro cameras (optional, defaults to auto-detect)
+    std::string test_data_path; // For image sequences (OAK-D Pro captured frames)
     Vec3 camera_position;
     float yaw, pitch, roll;
     float fov_degrees;
-    // Additional camera parameters can be added here
+    // OAK-D Pro specific parameters
+    bool use_depth;        // Whether to use depth data for enhanced reconstruction
+    int rgb_resolution_width;  // RGB camera resolution
+    int rgb_resolution_height;
+    int fps;               // Target FPS
 };
 
 struct FrameData {
@@ -189,48 +206,57 @@ std::vector<CameraInfo> load_camera_config(const std::string &json_path) {
     json j;
     ifs >> j;
     
-    // Check if JSON is an array (multiple cameras) or object (single camera)
-    if (j.is_array()) {
-        for (const auto &entry : j) {
-            CameraInfo ci;
-            ci.camera_index = entry.value("camera_index", 0);
-            ci.rtsp_url = entry.value("rtsp_url", "");
-            ci.yaw = entry.value("yaw", 0.f);
-            ci.pitch = entry.value("pitch", 0.f);
-            ci.roll = entry.value("roll", 0.f);
-            ci.fov_degrees = entry.value("fov_degrees", 60.f);
-
-            // camera_position array
-            if (entry.contains("camera_position") && entry["camera_position"].is_array()) {
-                auto arr = entry["camera_position"];
-                if (arr.size() >= 3) {
-                    ci.camera_position.x = arr[0].get<float>();
-                    ci.camera_position.y = arr[1].get<float>();
-                    ci.camera_position.z = arr[2].get<float>();
-                }
-            }
-            cameras.push_back(ci);
-        }
-    } else if (j.is_object()) {
-        // Handle single camera config
+    // Helper function to parse a single camera entry
+    auto parse_camera_entry = [](const json& entry) -> CameraInfo {
         CameraInfo ci;
-        ci.camera_index = j.value("camera_index", 0);
-        ci.rtsp_url = j.value("rtsp_url", "");
-        ci.yaw = j.value("yaw", 0.f);
-        ci.pitch = j.value("pitch", 0.f);
-        ci.roll = j.value("roll", 0.f);
-        ci.fov_degrees = j.value("fov_degrees", 60.f);
+        ci.camera_index = entry.value("camera_index", 0);
+        
+        // Determine camera type
+        std::string type_str = entry.value("camera_type", "rtsp");
+        if (type_str == "oak_d_pro") {
+            ci.camera_type = CameraType::OAK_D_PRO;
+            ci.device_id = entry.value("device_id", "");
+            ci.use_depth = entry.value("use_depth", false);
+            ci.rgb_resolution_width = entry.value("rgb_resolution_width", 1920);
+            ci.rgb_resolution_height = entry.value("rgb_resolution_height", 1080);
+            ci.fps = entry.value("fps", 30);
+            // For OAK-D Pro, use appropriate FOV based on sensor variant
+            ci.fov_degrees = entry.value("fov_degrees", 69.f); // Default for IMX378
+        } else {
+            ci.camera_type = CameraType::RTSP;
+            ci.rtsp_url = entry.value("rtsp_url", "");
+            ci.fov_degrees = entry.value("fov_degrees", 60.f);
+            // Set default values for OAK-D Pro fields
+            ci.use_depth = false;
+            ci.rgb_resolution_width = 1920;
+            ci.rgb_resolution_height = 1080;
+            ci.fps = 30;
+        }
+        
+        ci.yaw = entry.value("yaw", 0.f);
+        ci.pitch = entry.value("pitch", 0.f);
+        ci.roll = entry.value("roll", 0.f);
 
         // camera_position array
-        if (j.contains("camera_position") && j["camera_position"].is_array()) {
-            auto arr = j["camera_position"];
+        ci.camera_position = {0.f, 0.f, 0.f}; // default
+        if (entry.contains("camera_position") && entry["camera_position"].is_array()) {
+            auto arr = entry["camera_position"];
             if (arr.size() >= 3) {
                 ci.camera_position.x = arr[0].get<float>();
                 ci.camera_position.y = arr[1].get<float>();
                 ci.camera_position.z = arr[2].get<float>();
             }
         }
-        cameras.push_back(ci);
+        return ci;
+    };
+
+    // Check if JSON is an array (multiple cameras) or object (single camera)
+    if (j.is_array()) {
+        for (const auto &entry : j) {
+            cameras.push_back(parse_camera_entry(entry));
+        }
+    } else if (j.is_object()) {
+        cameras.push_back(parse_camera_entry(j));
     } else {
         std::cerr << "ERROR: JSON format not recognized.\n";
     }
@@ -501,8 +527,108 @@ void camera_stream_thread(
     std::cout << "Camera " << camera_info.camera_index << " thread stopped." << std::endl;
 }
 
+#ifdef HAVE_DEPTHAI
 //----------------------------------------------
-// 8) Processing Thread
+// 7.1) OAK-D Pro Camera Stream Thread
+//----------------------------------------------
+void oak_d_pro_stream_thread(
+    const CameraInfo& camera_info,
+    std::shared_ptr<FrameQueue> frame_queue,
+    std::atomic<bool>& running
+) {
+    try {
+        // Create pipeline
+        dai::Pipeline pipeline;
+
+        // Define source and output
+        auto camRgb = pipeline.create<dai::node::ColorCamera>();
+        auto rgbOut = pipeline.create<dai::node::XLinkOut>();
+        
+        rgbOut->setStreamName("rgb");
+
+        // Properties
+        camRgb->setResolution(dai::ColorCameraProperties::SensorResolution::THE_1080_P);
+        if (camera_info.rgb_resolution_width == 4056 && camera_info.rgb_resolution_height == 3040) {
+            camRgb->setResolution(dai::ColorCameraProperties::SensorResolution::THE_12_MP);
+        } else if (camera_info.rgb_resolution_width == 1920 && camera_info.rgb_resolution_height == 1080) {
+            camRgb->setResolution(dai::ColorCameraProperties::SensorResolution::THE_1080_P);
+        } else if (camera_info.rgb_resolution_width == 1280 && camera_info.rgb_resolution_height == 720) {
+            camRgb->setResolution(dai::ColorCameraProperties::SensorResolution::THE_720_P);
+        }
+        
+        camRgb->setInterleaved(false);
+        camRgb->setColorOrder(dai::ColorCameraProperties::ColorOrder::RGB);
+        camRgb->setFps(camera_info.fps);
+
+        // Linking
+        camRgb->video.link(rgbOut->input);
+
+        // Connect to device and start pipeline
+        dai::Device device;
+        if (!camera_info.device_id.empty()) {
+            device = dai::Device(pipeline, camera_info.device_id);
+        } else {
+            device = dai::Device(pipeline);
+        }
+
+        // Output queue will be used to get the rgb frames from the output defined above
+        auto q = device.getOutputQueue("rgb", 4, false);
+
+        std::cout << "OAK-D Pro Camera " << camera_info.camera_index << " connected successfully." << std::endl;
+
+        while (running) {
+            auto inRgb = q->get<dai::ImgFrame>();
+            if (inRgb) {
+                // Convert from DepthAI format to OpenCV Mat
+                cv::Mat frame = inRgb->getCvFrame();
+                
+                if (frame.empty()) {
+                    std::cerr << "WARNING: Empty frame received from OAK-D Pro camera " 
+                              << camera_info.camera_index << std::endl;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    continue;
+                }
+
+                // Create frame data and push to queue
+                FrameData frameData;
+                frameData.camera_index = camera_info.camera_index;
+                frameData.frame = frame.clone();
+                frameData.timestamp = std::chrono::steady_clock::now();
+                
+                frame_queue->push(frameData);
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        
+        std::cout << "OAK-D Pro Camera " << camera_info.camera_index << " thread stopped." << std::endl;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR: OAK-D Pro Camera " << camera_info.camera_index 
+                  << " failed: " << e.what() << std::endl;
+    }
+}
+#endif
+
+//----------------------------------------------
+// 8) Ray Intersection Structure for Stereo
+//----------------------------------------------
+struct MotionRay {
+    Vec3 origin;
+    Vec3 direction;
+    float intensity;
+    int camera_index;
+    std::chrono::steady_clock::time_point timestamp;
+};
+
+struct CameraMotionData {
+    int camera_index;
+    std::vector<MotionRay> motion_rays;
+    std::chrono::steady_clock::time_point timestamp;
+};
+
+//----------------------------------------------
+// 9) Stereo Processing Thread
 //----------------------------------------------
 void processing_thread(
     std::map<int, CameraInfo> camera_info_map,
@@ -525,6 +651,10 @@ void processing_thread(
     // Map to store the previous frame for each camera
     std::map<int, ImageGray> prev_frames;
     std::map<int, std::chrono::steady_clock::time_point> last_frame_times;
+    
+    // Buffer for stereo motion data - stores motion rays from each camera
+    std::map<int, CameraMotionData> motion_buffer;
+    const int max_time_diff_ms = 500; // Maximum time difference between cameras for stereo matching
     
     auto last_save_time = std::chrono::system_clock::now();
     
@@ -571,80 +701,255 @@ void processing_thread(
                 float fov_v_rad = 2.f * std::atan((1.f / aspect) * std::tan(fov_h_rad * 0.5f));
                 float fy = (mm.height * 0.5f) / std::tan(fov_v_rad * 0.5f);
 
-                // For each changed pixel, accumulate into the voxel grid
-                bool any_voxel_written = false;
-                {
-                    std::lock_guard<std::mutex> lock(voxel_grid_mutex);
+                // Collect motion rays for this camera
+                CameraMotionData cmd;
+                cmd.camera_index = camera_index;
+                cmd.timestamp = frame_data.timestamp;
+                cmd.motion_rays.clear();
+                
+                for (int v = 0; v < mm.height; v++) {
+                    for (int u = 0; u < mm.width; u++) {
+                        if (!mm.changed[v * mm.width + u])
+                            continue; // skip if no motion
+
+                        float pix_val = mm.diff[v * mm.width + u];
+                        if (pix_val < 1e-3f)
+                            continue;
+
+                        // Build local camera direction
+                        float x = (float(u) - 0.5f * mm.width)  / fx;
+                        float y = -(float(v) - 0.5f * mm.height) / fy;
+                        Vec3 ray_cam = { x, y, -1.f };
+                        ray_cam = normalize(ray_cam);
+
+                        // Transform to world
+                        Vec3 ray_world = mat3_mul_vec3(cam_rot, ray_cam);
+                        ray_world = normalize(ray_world);
+
+                        // Store the motion ray
+                        MotionRay ray;
+                        ray.origin = cam_pos;
+                        ray.direction = ray_world;
+                        ray.intensity = pix_val;
+                        ray.camera_index = camera_index;
+                        ray.timestamp = frame_data.timestamp;
+                        cmd.motion_rays.push_back(ray);
+                    }
+                }
+                
+                // Store motion data for this camera
+                motion_buffer[camera_index] = cmd;
+                
+                if (cmd.motion_rays.size() > 0) {
+                    std::cout << "[DEBUG] Camera " << camera_index << " detected " 
+                              << cmd.motion_rays.size() << " motion rays" << std::endl;
+                }
+                
+                // Check if we have recent motion data from other cameras for stereo processing
+                bool has_stereo_data = false;
+                for (const auto& other_cam : camera_info_map) {
+                    int other_cam_id = other_cam.first;
+                    if (other_cam_id == camera_index) continue;
                     
-                    for (int v = 0; v < mm.height; v++) {
-                        for (int u = 0; u < mm.width; u++) {
-                            if (!mm.changed[v * mm.width + u])
-                                continue; // skip if no motion
-
-                            float pix_val = mm.diff[v * mm.width + u];
-                            if (pix_val < 1e-3f)
-                                continue;
-
-                            // Build local camera direction
-                            float x = (float(u) - 0.5f * mm.width)  / fx;
-                            float y = -(float(v) - 0.5f * mm.height) / fy;
-                            Vec3 ray_cam = { x, y, -1.f };
-                            ray_cam = normalize(ray_cam);
-
-                            // Transform to world
-                            Vec3 ray_world = mat3_mul_vec3(cam_rot, ray_cam);
-                            ray_world = normalize(ray_world);
-
-                            // DDA
-                            std::vector<RayStep> steps = cast_ray_into_grid(
-                                cam_pos, ray_world, N, voxel_size, grid_center);
-
-                            // Accumulate
-                            for (const auto& rs : steps) {
-                                float dist = rs.distance;
-                                float attenuation = 1.f / (1.f + alpha * dist);
-                                float val = pix_val * attenuation;
-                                int idx = rs.ix * N * N + rs.iy * N + rs.iz;
-                                voxel_grid[idx] += val;
-                                any_voxel_written = true;
-                            }
+                    if (motion_buffer.find(other_cam_id) != motion_buffer.end()) {
+                        auto time_diff_stereo = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            cmd.timestamp - motion_buffer[other_cam_id].timestamp).count();
+                        
+                        if (std::abs(time_diff_stereo) < max_time_diff_ms) {
+                            has_stereo_data = true;
+                            break;
                         }
                     }
                 }
-
-                if (any_voxel_written) {
-                    auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-                    std::cout << "[" << std::put_time(std::localtime(&t), "%H:%M:%S")
-                              << "] Camera " << camera_index << " added voxels." << std::endl;
-                }
-#ifdef HAVE_ZMQ
-                // Publish compressed voxel grid every frame for live viewer
-                if (pub_socket && pub_socket->handle() != nullptr) {
-                    std::lock_guard<std::mutex> grid_lock(voxel_grid_mutex);
-
-                    struct Meta { int N; float voxel_size; } meta{N, voxel_size};
-
-                    // Compress voxel vector (fast)
-                    uLong src_len = voxel_grid.size() * sizeof(float);
-                    uLong dst_len = compressBound(src_len);
-                    std::vector<uint8_t> compressed(dst_len);
-                    if (compress2(compressed.data(), &dst_len,
-                                  reinterpret_cast<const Bytef*>(voxel_grid.data()),
-                                  src_len, Z_BEST_SPEED) == Z_OK) {
-                        compressed.resize(dst_len);
-
-                        zmq::message_t m_meta(sizeof(meta));
-                        memcpy(m_meta.data(), &meta, sizeof(meta));
-
-                        zmq::message_t m_data(compressed.size());
-                        memcpy(m_data.data(), compressed.data(), compressed.size());
-
-                        pub_socket->send(m_meta, zmq::send_flags::sndmore);
-                        pub_socket->send(m_data, zmq::send_flags::dontwait);
+                
+                // Process stereo reconstruction if we have synchronized data
+                if (has_stereo_data && motion_buffer.size() >= 2) {
+                    std::cout << "[DEBUG] Processing stereo with " << motion_buffer.size() 
+                              << " cameras" << std::endl;
+                    
+                    // More efficient approach: find ray intersections between camera pairs
+                    std::vector<float> intersection_grid(N*N*N, 0.f);
+                    bool any_intersection = false;
+                    int total_cameras_with_evidence = 0;
+                    int intersection_count = 0;
+                    
+                    // Get list of cameras with recent data
+                    std::vector<std::pair<int, const CameraMotionData*>> active_cameras;
+                    for (const auto& cam_data : motion_buffer) {
+                        auto time_diff_cam = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            cmd.timestamp - cam_data.second.timestamp).count();
+                        if (std::abs(time_diff_cam) <= max_time_diff_ms) {
+                            active_cameras.push_back({cam_data.first, &cam_data.second});
+                        }
+                    }
+                    
+                    std::cout << "[DEBUG] Found " << active_cameras.size() << " active cameras" << std::endl;
+                    
+                    // For each pair of cameras, find ray intersections
+                    for (size_t i = 0; i < active_cameras.size(); i++) {
+                        for (size_t j = i + 1; j < active_cameras.size(); j++) {
+                            const auto& cam1_data = *active_cameras[i].second;
+                            const auto& cam2_data = *active_cameras[j].second;
+                            
+                            std::cout << "[DEBUG] Checking " << cam1_data.motion_rays.size() 
+                                      << " vs " << cam2_data.motion_rays.size() << " rays" << std::endl;
+                            
+                            // Sample rays to avoid O(n²) complexity - much more selective
+                            int max_rays_to_check = 200;  // Reduced from 1000
+                            int ray1_step = std::max(1, (int)cam1_data.motion_rays.size() / max_rays_to_check);
+                            int ray2_step = std::max(1, (int)cam2_data.motion_rays.size() / max_rays_to_check);
+                            
+                            for (size_t r1 = 0; r1 < cam1_data.motion_rays.size(); r1 += ray1_step) {
+                                for (size_t r2 = 0; r2 < cam2_data.motion_rays.size(); r2 += ray2_step) {
+                                    const auto& ray1 = cam1_data.motion_rays[r1];
+                                    const auto& ray2 = cam2_data.motion_rays[r2];
+                                    
+                                    // Only process strong motion rays
+                                    if (ray1.intensity < 30.0f || ray2.intensity < 30.0f) continue;
+                                    
+                                    // Find closest approach between two rays
+                                    Vec3 w0 = {ray1.origin.x - ray2.origin.x,
+                                              ray1.origin.y - ray2.origin.y, 
+                                              ray1.origin.z - ray2.origin.z};
+                                    
+                                    float a = ray1.direction.x * ray1.direction.x + 
+                                             ray1.direction.y * ray1.direction.y + 
+                                             ray1.direction.z * ray1.direction.z;
+                                    float b = ray1.direction.x * ray2.direction.x + 
+                                             ray1.direction.y * ray2.direction.y + 
+                                             ray1.direction.z * ray2.direction.z;
+                                    float c = ray2.direction.x * ray2.direction.x + 
+                                             ray2.direction.y * ray2.direction.y + 
+                                             ray2.direction.z * ray2.direction.z;
+                                    float d = ray1.direction.x * w0.x + 
+                                             ray1.direction.y * w0.y + 
+                                             ray1.direction.z * w0.z;
+                                    float e = ray2.direction.x * w0.x + 
+                                             ray2.direction.y * w0.y + 
+                                             ray2.direction.z * w0.z;
+                                    
+                                    float denom = a * c - b * b;
+                                    if (std::abs(denom) < 1e-10) continue; // Parallel rays
+                                    
+                                    float t1 = (b * e - c * d) / denom;
+                                    float t2 = (a * e - b * d) / denom;
+                                    
+                                    if (t1 < 0 || t2 < 0) continue; // Behind cameras
+                                    
+                                    // Points of closest approach
+                                    Vec3 p1 = {ray1.origin.x + t1 * ray1.direction.x,
+                                              ray1.origin.y + t1 * ray1.direction.y,
+                                              ray1.origin.z + t1 * ray1.direction.z};
+                                    Vec3 p2 = {ray2.origin.x + t2 * ray2.direction.x,
+                                              ray2.origin.y + t2 * ray2.direction.y,
+                                              ray2.origin.z + t2 * ray2.direction.z};
+                                    
+                                    // Distance between closest points
+                                    float dist = std::sqrt((p1.x - p2.x) * (p1.x - p2.x) +
+                                                          (p1.y - p2.y) * (p1.y - p2.y) +
+                                                          (p1.z - p2.z) * (p1.z - p2.z));
+                                    
+                                    // If rays intersect closely, add to voxel grid
+                                    if (dist < voxel_size * 1.5f) { // Much stricter intersection threshold
+                                        Vec3 intersection = {(p1.x + p2.x) * 0.5f,
+                                                           (p1.y + p2.y) * 0.5f,
+                                                           (p1.z + p2.z) * 0.5f};
+                                        
+                                        // Convert to voxel coordinates
+                                        int ix = (int)((intersection.x - grid_center.x) / voxel_size + N/2.0f);
+                                        int iy = (int)((intersection.y - grid_center.y) / voxel_size + N/2.0f);
+                                        int iz = (int)((intersection.z - grid_center.z) / voxel_size + N/2.0f);
+                                        
+                                        // Debug: Print a few intersection coordinates
+                                        static int debug_count = 0;
+                                        if (debug_count < 5) {
+                                            std::cout << "[DEBUG] Intersection at (" << intersection.x << ", " 
+                                                      << intersection.y << ", " << intersection.z 
+                                                      << ") -> voxel (" << ix << ", " << iy << ", " << iz << ")" << std::endl;
+                                            debug_count++;
+                                        }
+                                        
+                                        if (ix >= 0 && ix < N && iy >= 0 && iy < N && iz >= 0 && iz < N) {
+                                            int idx = ix * N * N + iy * N + iz;
+                                            float weight = 1.0f / (1.0f + dist * dist / (voxel_size * voxel_size));
+                                            float intensity = (ray1.intensity + ray2.intensity) * weight;
+                                            intersection_grid[idx] += intensity;
+                                            any_intersection = true;
+                                            intersection_count++;
+                                            
+                                            // Debug: Count successful voxel updates
+                                            static int voxel_update_count = 0;
+                                            if (voxel_update_count < 3) {
+                                                std::cout << "[DEBUG] Updated voxel (" << ix << ", " << iy << ", " << iz 
+                                                          << ") with intensity " << intensity << std::endl;
+                                                voxel_update_count++;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    std::cout << "[DEBUG] Found " << intersection_count << " ray intersections" << std::endl;
+                    
+                    // Apply intersection results to main voxel grid
+                    if (any_intersection) {
+                        std::lock_guard<std::mutex> lock(voxel_grid_mutex);
+                        for (int i = 0; i < N*N*N; i++) {
+                            if (intersection_grid[i] > 0) {
+                                voxel_grid[i] += intersection_grid[i] * alpha; // Scale by attenuation factor
+                            }
+                        }
+                        
+                        auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                        std::cout << "[" << std::put_time(std::localtime(&t), "%H:%M:%S")
+                                  << "] Stereo intersection: " << intersection_count 
+                                  << " intersections found, updated voxels." << std::endl;
+                    }
+                    
+                    // Clean up old motion data (keep only recent)
+                    auto now = std::chrono::steady_clock::now();
+                    for (auto it = motion_buffer.begin(); it != motion_buffer.end();) {
+                        auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - it->second.timestamp).count();
+                        if (age_ms > max_time_diff_ms * 3) { // Keep data for 3x the sync window
+                            it = motion_buffer.erase(it);
+                        } else {
+                            ++it;
+                        }
                     }
                 }
-#endif
             }
+            
+#ifdef HAVE_ZMQ
+            // Publish compressed voxel grid occasionally for live viewer
+            static int frame_count = 0;
+            if (++frame_count % 30 == 0 && pub_socket && pub_socket->handle() != nullptr) {
+                std::lock_guard<std::mutex> grid_lock(voxel_grid_mutex);
+
+                struct Meta { int N; float voxel_size; } meta{N, voxel_size};
+
+                // Compress voxel vector (fast)
+                uLong src_len = voxel_grid.size() * sizeof(float);
+                uLong dst_len = compressBound(src_len);
+                std::vector<uint8_t> compressed(dst_len);
+                if (compress2(compressed.data(), &dst_len,
+                              reinterpret_cast<const Bytef*>(voxel_grid.data()),
+                              src_len, Z_BEST_SPEED) == Z_OK) {
+                    compressed.resize(dst_len);
+
+                    zmq::message_t m_meta(sizeof(meta));
+                    memcpy(m_meta.data(), &meta, sizeof(meta));
+
+                    zmq::message_t m_data(compressed.size());
+                    memcpy(m_data.data(), compressed.data(), compressed.size());
+
+                    pub_socket->send(m_meta, zmq::send_flags::sndmore);
+                    pub_socket->send(m_data, zmq::send_flags::dontwait);
+                }
+            }
+#endif
             
             // Update previous frame and timestamp
             prev_frames[camera_index] = curr_img;
@@ -739,14 +1044,27 @@ int main(int argc, char** argv) {
     
     std::vector<std::thread> camera_threads;
     for (const auto& camera : cameras) {
-        camera_threads.emplace_back(camera_stream_thread, 
-                                   camera, 
-                                   frame_queue, 
-                                   std::ref(running));
+        if (camera.camera_type == CameraType::RTSP) {
+            camera_threads.emplace_back(camera_stream_thread, 
+                                       camera, 
+                                       frame_queue, 
+                                       std::ref(running));
+        } 
+#ifdef HAVE_DEPTHAI
+        else if (camera.camera_type == CameraType::OAK_D_PRO) {
+            camera_threads.emplace_back(oak_d_pro_stream_thread, 
+                                       camera, 
+                                       frame_queue, 
+                                       std::ref(running));
+        }
+#endif
+        else {
+            std::cerr << "ERROR: Unknown camera type for camera " << camera.camera_index << std::endl;
+        }
     }
     
     // Processing thread
-    float motion_threshold = 5.0f;  // higher threshold for real-time processing
+    float motion_threshold = 25.0f;  // much higher threshold to reduce noise
     float alpha = 0.1f;            // distance-based attenuation
     
 #ifdef HAVE_ZMQ

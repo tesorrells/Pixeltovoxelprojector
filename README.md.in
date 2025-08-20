@@ -9,6 +9,23 @@ This project processes multiple RTSP camera streams in real-time to detect motio
 - OpenCV (with videoio support for RTSP streams)
 - nlohmann_json (automatically fetched by CMake if not found)
 - OpenMP (optional, for parallel processing)
+- DepthAI (optional, for OAK-D Pro camera support)
+
+### Installing DepthAI for OAK-D Pro Support
+
+To enable OAK-D Pro camera support, install the DepthAI C++ library:
+
+```bash
+# Install DepthAI C++ library
+pip install depthai
+
+# On Ubuntu/Debian, you may also need:
+sudo apt install libusb-1.0-0-dev
+
+# Add udev rules for OAK cameras (run once)
+echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"' | sudo tee /etc/udev/rules.d/80-movidius.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
 
 ## Building
 
@@ -38,30 +55,88 @@ Parameters:
 
 ## Camera Configuration
 
-Create a JSON file with camera information:
+Create a JSON file with camera information. The system supports both RTSP cameras and OAK-D Pro cameras.
+
+### RTSP Camera Configuration
 
 ```json
 [
   {
     "camera_index": 0,
+    "camera_type": "rtsp",
     "rtsp_url": "rtsp://admin:password@192.168.1.100:554/live",
     "camera_position": [0.0, 0.0, 0.0],
     "yaw": 0.0,
     "pitch": 0.0,
     "roll": 0.0,
     "fov_degrees": 60.0
+  }
+]
+```
+
+### OAK-D Pro Camera Configuration
+
+```json
+[
+  {
+    "camera_index": 0,
+    "camera_type": "oak_d_pro",
+    "device_id": "",
+    "camera_position": [0.0, 0.0, 0.0],
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "fov_degrees": 69.0,
+    "use_depth": false,
+    "rgb_resolution_width": 1920,
+    "rgb_resolution_height": 1080,
+    "fps": 30
+  }
+]
+```
+
+### Mixed Configuration
+
+You can mix different camera types in the same configuration:
+
+```json
+[
+  {
+    "camera_index": 0,
+    "camera_type": "oak_d_pro",
+    "device_id": "",
+    "camera_position": [0.0, 0.0, 0.0],
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "fov_degrees": 69.0,
+    "use_depth": false,
+    "rgb_resolution_width": 1920,
+    "rgb_resolution_height": 1080,
+    "fps": 30
   },
   {
     "camera_index": 1,
-    "rtsp_url": "rtsp://admin:password@192.168.1.101:554/live",
+    "camera_type": "rtsp",
+    "rtsp_url": "rtsp://admin:password@192.168.1.100:554/live",
     "camera_position": [100.0, 0.0, 0.0],
     "yaw": 270.0,
     "pitch": 0.0,
     "roll": 0.0,
-    "fov_degrees": 60.0
+    "fov_degrees": 87.0
   }
 ]
 ```
+
+### OAK-D Pro Configuration Parameters
+
+- `device_id`: (Optional) Specific device ID if multiple OAK devices are connected. Leave empty for auto-detection.
+- `use_depth`: (Optional) Whether to use depth data for enhanced reconstruction. Currently set to false (RGB-only mode).
+- `rgb_resolution_width/height`: RGB camera resolution. Supported: 1920x1080, 1280x720, or 4056x3040 (12MP).
+- `fps`: Target frame rate (typically 30 or 60 fps).
+- `fov_degrees`: Field of view. Default values:
+  - IMX378 sensor (Auto-focus/Fixed-focus): 69° 
+  - OV9782 sensor: 80°
 
 ## Controls
 
@@ -76,6 +151,18 @@ The output voxel grid is saved as a binary file with the following format:
 2. Next 4 bytes: voxel size as float32
 3. Remaining bytes: N×N×N grid data as float32 array
 
+## Testing OAK-D Pro Setup
+
+To test if your OAK-D Pro camera is working:
+
+```bash
+# Run with the example OAK-D Pro configuration
+./rtsp_processor config/oak_d_pro_config.json
+
+# Or test with mixed cameras
+./rtsp_processor config/mixed_camera_config.json
+```
+
 ## Troubleshooting
 
 ### RTSP Connection Issues
@@ -83,6 +170,24 @@ The output voxel grid is saved as a binary file with the following format:
 If cameras fail to connect:
 1. Verify the RTSP URL format is correct (including credentials if needed)
 2. Check network connectivity and firewall settings
+
+### OAK-D Pro Connection Issues
+
+If OAK-D Pro camera fails to connect:
+1. Ensure the camera is connected via USB 3.0 or USB-C port
+2. Check that udev rules are installed correctly:
+   ```bash
+   ls -la /etc/udev/rules.d/80-movidius.rules
+   ```
+3. Verify DepthAI installation:
+   ```bash
+   python3 -c "import depthai; print('DepthAI version:', depthai.__version__)"
+   ```
+4. Test basic camera functionality:
+   ```bash
+   python3 -c "import depthai as dai; print('Available devices:', len(dai.Device.getAllAvailableDevices()))"
+   ```
+5. If multiple OAK devices are connected, specify a `device_id` in the configuration
 3. Ensure the cameras support the RTSP protocol
 
 ### Performance Optimization
